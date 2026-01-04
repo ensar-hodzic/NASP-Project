@@ -18,7 +18,7 @@ import { lonLatToMercator } from "../../geo";
 import { buildKDTree } from "../../KdTree";
 
 
-const defaultIcon = L.icon({
+const defaultIcon = L.icon({  
   iconUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png",
   iconRetinaUrl:
     "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png",
@@ -148,6 +148,10 @@ export default function CompareMaps() {
   const [linAnimDurationMs, setLinAnimDurationMs] = useState<number | null>(null);
   const [kdAnimStartTime, setKdAnimStartTime] = useState<number | null>(null);
   const [kdAnimDurationMs, setKdAnimDurationMs] = useState<number | null>(null);
+
+  const [benchRunning, setBenchRunning] = useState(false);
+  const [benchResult, setBenchResult] = useState<any | null>(null);
+  const [benchError, setBenchError] = useState<string | null>(null);
 
   const projected = useMemo(() => restaurants.map((r) => lonLatToMercator([r.lon, r.lat])), [restaurants]);
   const latlons = useMemo(() => restaurants.map((r) => [r.lat, r.lon] as [number, number]), [restaurants]);
@@ -316,6 +320,62 @@ export default function CompareMaps() {
     setKdIsPlaying(true);
   };
 
+  // Fast / skip-visualization run: compute both searches and set final state immediately
+  const runFastSearch = () => {
+    if (!markerPos || restaurants.length === 0) return;
+
+    // stop any animations
+    setLinIsPlaying(false);
+    setKdIsPlaying(false);
+    setLinAnimStartTime(null);
+    setLinAnimDurationMs(null);
+    setKdAnimStartTime(null);
+    setKdAnimDurationMs(null);
+
+    // linear (geodesic) search — compute and set final index
+    const linInfo = linearRangeSearchTraceGeo(projected, latlons, [markerPos[0], markerPos[1]], radiusMeters);
+    setLinSearchInfo(linInfo);
+    setLinStepIdx(Math.max(0, linInfo.steps.length - 1));
+
+    // KD tree build + search
+    const t0 = nowMs();
+    const root = (buildKDTree(projected) as unknown) as KDNode | null;
+    const t1 = nowMs();
+    setKdBuildMs(t1 - t0);
+
+    const centerMerc = lonLatToMercator([markerPos[1], markerPos[0]]);
+    const phiRad = (markerPos[0] * Math.PI) / 180;
+    const rProj = radiusMeters / Math.cos(phiRad);
+    const kdInfo = rangeSearchTrace(root, centerMerc, rProj);
+    setKdSearchInfo(kdInfo);
+    setKdStepIdx(Math.max(0, kdInfo.steps.length - 1));
+
+    // mark playback durations as completed immediately
+    setLinAnimDurationMs(0);
+    setKdAnimDurationMs(0);
+  };
+
+  const runServerBenchmark = async () => {
+    if (!markerPos) return;
+    setBenchRunning(true);
+    setBenchResult(null);
+    setBenchError(null);
+    try {
+      const res = await fetch('/api/benchmark', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ centerLat: markerPos[0], centerLon: markerPos[1], radiusMeters, fetchRadiusMeters: 2000 }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || 'benchmark failed');
+      setBenchResult(data);
+    } catch (e) {
+      setBenchError(String(e));
+    } finally {
+      setBenchRunning(false);
+    }
+  };
+
   const linVisitedSet = useMemo(() => {
     const s = new Set<string>();
     for (let i = 0; i <= linStepIdx && i < linSearchInfo.steps.length; i++) {
@@ -420,6 +480,21 @@ export default function CompareMaps() {
             Start
           </button>
           <button
+            type="button"
+            onClick={runFastSearch}
+            className="px-4 py-2 rounded bg-indigo-600 text-white hover:bg-indigo-700 font-medium text-sm"
+          >
+            Skip visualization
+          </button>
+          <button
+            type="button"
+            onClick={() => runServerBenchmark()}
+            disabled={!markerPos || benchRunning}
+            className="px-4 py-2 rounded bg-sky-600 text-white hover:bg-sky-700 font-medium text-sm"
+          >
+            {benchRunning ? 'Benchmarking…' : 'Benchmark (server)'}
+          </button>
+          <button
             onClick={() => {
               setLinIsPlaying(false);
               setKdIsPlaying(false);
@@ -448,6 +523,21 @@ export default function CompareMaps() {
             Stop
           </button>
         </div>
+
+        {benchResult && (
+          <div className="mt-3 p-3 bg-gray-50 rounded border border-slate-200 text-sm text-black">
+            <div className="font-semibold mb-2">Server benchmark results — {benchResult.count} POIs</div>
+            <div>KD build: {benchResult.buildMs?.toFixed(4)} ms</div>
+            <div>KD search: {benchResult.kdMs?.toFixed(4)} ms</div>
+            <div>Linear: {benchResult.linMs?.toFixed(4)} ms</div>
+            <div className="mt-2">KD visited: {benchResult.kdVisited ?? '—'} / {benchResult.count}</div>
+            <div>Linear visited: {benchResult.linVisited ?? '—'} / {benchResult.count}</div>
+            <div className="mt-2">Inside (linear): {benchResult.linInsideCount ?? benchResult.inside?.length}</div>
+          </div>
+        )}
+        {benchError && (
+          <div className="mt-3 p-2 bg-red-50 rounded border border-red-200 text-sm text-red-700">{benchError}</div>
+        )}
 
         <div className="grid grid-cols-2 gap-6">
           <div>

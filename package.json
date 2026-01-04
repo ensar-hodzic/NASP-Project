@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "benchmark": "node scripts/benchmark.js"
   },
   "dependencies": {
     "@emotion/react": "^11.14.0",
